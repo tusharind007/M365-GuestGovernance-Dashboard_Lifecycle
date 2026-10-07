@@ -1,0 +1,21 @@
+# Secrets and Local Configurations
+config.json
+*.pfx
+*.cer
+*.key
+*.pem
+
+# Output & Reports
+Reports/
+GuestCleanupState.json
+*.csv
+*.html
+*.log
+*.txt
+
+# PowerShell & System artifacts
+*.tmp
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

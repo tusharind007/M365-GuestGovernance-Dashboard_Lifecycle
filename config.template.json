@@ -1,0 +1,29 @@
+{
+  "OrganizationName": "YourOrganization",
+  "TenantId": "00000000-0000-0000-0000-000000000000",
+  "ClientId": "00000000-0000-0000-0000-000000000000",
+  "CertThumbprint": "0123456789ABCDEF0123456789ABCDEF01234567",
+  "ReportPath": ".\\Reports",
+  "ReportRetentionDays": 90,
+  "DryRun": true,
+  "StaleThresholdDays": 90,
+  "DormantThresholdDays": 30,
+  "GracePeriodDays": 7,
+  "AutoDisableStaleGuests": false,
+  "AutoDeleteDisabledGuests": false,
+  "DeleteAfterDisabledDays": 90,
+  "ApprovedGuestGroupId": "00000000-0000-0000-0000-000000000000",
+  "ApprovedGuestGroupName": "Approved_External_Guests",
+  "RequireConsecutiveStaleRuns": 2,
+  "SenderEmail": "admin@yourdomain.com",
+  "RecipientEmail": "governance-alerts@yourdomain.com",
+  "EmailSubject": "Guest User Review & Cleanup Dashboard - {Date}",
+  "RequiredGraphPermissions": [
+    "User.Read.All",
+    "User.ReadWrite.All",
+    "AuditLog.Read.All",
+    "Directory.Read.All",
+    "GroupMember.Read.All",
+    "Mail.Send"
+  ]
+}
