@@ -13,7 +13,7 @@ This tool inventories all external guest users, tracks inviter and group access 
   - Tracking of invited-by relationships, invitation acceptance rates, and external domain categorization (Corporate vs Consumer).
   - Last sign-in activity analysis via Graph `signInActivity` (with account-age fallback).
   - Identification of recently invited guests ($\le 7$ days) and pending invitations.
-  - Segregation of formally approved vs non-approved guest accounts.
+  - Active vs Dormant vs Stale lifecycle distribution.
 - **Outlook-Optimized HTML Dashboard:**
   - Responsive, centered 880px design with pixel-bar charts that render reliably in Microsoft Outlook desktop and web clients.
   - Interactive standalone HTML and CSV inventory attachments sent automatically via Microsoft Graph Mail API.
@@ -89,8 +89,6 @@ This tool inventories all external guest users, tracks inviter and group access 
      "AutoDisableStaleGuests": false,
      "AutoDeleteDisabledGuests": false,
      "DeleteAfterDisabledDays": 90,
-     "ApprovedGuestGroupId": "OPTIONAL-APPROVED-GROUP-GUID",
-     "ApprovedGuestGroupName": "Approved_External_Guests",
      "RequireConsecutiveStaleRuns": 2,
      "SenderEmail": "admin@yourdomain.com",
      "RecipientEmail": "governance-alerts@yourdomain.com",

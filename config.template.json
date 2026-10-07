@@ -12,8 +12,6 @@
   "AutoDisableStaleGuests": false,
   "AutoDeleteDisabledGuests": false,
   "DeleteAfterDisabledDays": 90,
-  "ApprovedGuestGroupId": "00000000-0000-0000-0000-000000000000",
-  "ApprovedGuestGroupName": "Approved_External_Guests",
   "RequireConsecutiveStaleRuns": 2,
   "SenderEmail": "admin@yourdomain.com",
   "RecipientEmail": "governance-alerts@yourdomain.com",

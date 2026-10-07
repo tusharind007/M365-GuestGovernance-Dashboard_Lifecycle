@@ -78,8 +78,6 @@ if (-not $GracePeriodDays) { $GracePeriodDays = if ($null -ne $cfg.GracePeriodDa
 if (-not $DeleteAfterDisabledDays -or $DeleteAfterDisabledDays -le 0) { $DeleteAfterDisabledDays = if ($cfg.DeleteAfterDisabledDays) { [int]$cfg.DeleteAfterDisabledDays } else { 90 } }
 $RequireRuns       = if ($cfg.RequireConsecutiveStaleRuns) { [int]$cfg.RequireConsecutiveStaleRuns } else { 2 }
 $RetentionDays     = if ($cfg.ReportRetentionDays) { [int]$cfg.ReportRetentionDays } else { 90 }
-$ApprovedGroupId   = if ($cfg.ApprovedGuestGroupId) { [string]$cfg.ApprovedGuestGroupId } else { "0f8925a0-5996-488b-b33b-9aa864e1f2f3" }
-$ApprovedGroupName = if ($cfg.ApprovedGuestGroupName) { [string]$cfg.ApprovedGuestGroupName } else { "XUSR_CA_ExternalUsers_DownloadAllowed" }
 $SenderEmail       = $cfg.SenderEmail
 $RecipientEmail    = $cfg.RecipientEmail
 $SubjectTemplate   = if ($cfg.EmailSubject) { $cfg.EmailSubject } else { "Guest User Review & Cleanup Dashboard - {Date}" }
@@ -311,7 +309,6 @@ try {
       GroupCount        = 0
       TeamCount         = 0
       PrivilegedGroups  = ""
-      Approved          = $false  # member of ApprovedGuestGroupId?
       RecentlyInvited   = $false  # invited within last 7 days?
       BusinessOwner     = ""   # inviter where known, else Unassigned (see Notes)
       AccessSummary     = ""   # N groups / M Teams compact footprint
@@ -353,7 +350,6 @@ try {
           # Strip Org name case-insensitively before regex matching to prevent "OrgName" matching substrings
           $priv = @($names | Where-Object { ($clean = $_ -replace "(?i)$Org", "") -match $PrivilegedGroupRegex })
           $u.PrivilegedGroups = ($priv -join "; ")
-          $u.Approved = (@($grps | Where-Object { $_.id -eq $ApprovedGroupId -or $_.displayName -eq $ApprovedGroupName }).Count -gt 0)
         } elseif ($m -and $m.status -ne 200) {
           Write-Log "Sub-request memberOf for $($u.UserPrincipalName) returned HTTP $($m.status)" -Level "WARNING"
         }
@@ -560,11 +556,9 @@ try {
         }
         elseif ($r.Status -eq "Active") { "Keep" }
         elseif ($r.Status -eq "Unknown") { "Investigate (no dates)" }
-        elseif ($r.Status -eq "Dormant" -and $r.Approved) { "Keep" }
-        elseif ($r.Status -eq "Dormant") { "Approve (add to group)" }
+        elseif ($r.Status -eq "Dormant") { "Review (Dormant)" }
         elseif ($r.InviteStatus -eq "PendingAcceptance" -and $r.AgeDays -ne $null -and $r.AgeDays -lt $StaleThresholdDays) { "Awaiting acceptance" }
-        elseif (($r.Status -eq "Stale" -or $r.Status -eq "NeverSignedIn") -and -not $r.Approved) { "Disable after review" }
-        elseif ($r.Status -eq "Stale" -or $r.Status -eq "NeverSignedIn") { "Owner confirmation" }
+        elseif ($r.Status -eq "Stale" -or $r.Status -eq "NeverSignedIn") { "Disable after review" }
         else { "In lifecycle watch" }
       }
     }
@@ -676,24 +670,10 @@ try {
     $trendRows += [PSCustomObject]@{ Month = $mlabel; Count = $c }
   }
   $maxTrend = [math]::Max(1, (($trendRows | Measure-Object Count -Maximum).Maximum))
-  # Approved vs non-approved (membership in $ApprovedGroupName)
-  $approvedGuests = @($rows | Where-Object { $_.Approved })
-  $nonApprovedGuests = @($rows | Where-Object { -not $_.Approved })
-  $approvedC = $approvedGuests.Count
-  $nonApprovedC = $nonApprovedGuests.Count
-  $nonApprovedStale = @($nonApprovedGuests | Where-Object { $_.Status -eq "Stale" -or $_.Status -eq "NeverSignedIn" -or $_.Status -eq "Stale-Disabled" }).Count
-  $approvedStale = @($approvedGuests | Where-Object { $_.Status -eq "Stale" -or $_.Status -eq "NeverSignedIn" -or $_.Status -eq "Stale-Disabled" }).Count
-  $nonApprovedList = $nonApprovedGuests | Sort-Object InactiveDays -Descending | Select-Object -First 15
-  # Approval 2x2: (Active+Dormant) vs (Stale+Never+Stale-Disabled); Unknown shown separately.
-  # NOTE: must stay after $approvedGuests/$nonApprovedGuests are defined (was zeros before).
-  $apprActive = @($approvedGuests | Where-Object { $_.Status -eq "Active" -or $_.Status -eq "Dormant" }).Count
-  $apprStale = @($approvedGuests | Where-Object { $_.Status -eq "Stale" -or $_.Status -eq "NeverSignedIn" -or $_.Status -eq "Stale-Disabled" }).Count
-  $nonApprActive = @($nonApprovedGuests | Where-Object { $_.Status -eq "Active" -or $_.Status -eq "Dormant" }).Count
-  $nonApprStale = @($nonApprovedGuests | Where-Object { $_.Status -eq "Stale" -or $_.Status -eq "NeverSignedIn" -or $_.Status -eq "Stale-Disabled" }).Count
   # Recommended-action counts (executive summary + actions table)
   $recDisable = @($rows | Where-Object { $_.RecommendedAction -eq "Disable after review" }).Count
   $recOwner = @($rows | Where-Object { $_.RecommendedAction -eq "Owner confirmation" }).Count
-  $recApprove = @($rows | Where-Object { $_.RecommendedAction -like "Approve*" }).Count
+  $recApprove = @($rows | Where-Object { $_.RecommendedAction -like "Approve*" -or $_.RecommendedAction -like "Dormant*" }).Count
   $recKeep = @($rows | Where-Object { $_.RecommendedAction -eq "Keep" }).Count
   $recAwait = @($rows | Where-Object { $_.RecommendedAction -eq "Awaiting acceptance" }).Count
   # Trend rollups: Jun–Sep dominant period + Oct MTD
@@ -705,7 +685,7 @@ try {
   $peakCount = $peakRow.Count
 
   # ----- HTML email (Outlook-compatible: tables + inline CSS only, no JS/forms) -----
-  # Priority queue for action list (action needed and non-approved stale guests first)
+  # Priority queue for action list (action needed and stale guests first)
   $actionRank = @{
     "DryRun-Delete"  = 0
     "DryRun-Disable" = 1
@@ -717,12 +697,12 @@ try {
     "DisabledHold"   = 4
     "None"           = 5
   }
-  $queueList = $rows | Sort-Object @{ Expression = { if ($actionRank.ContainsKey($_.CleanupAction)) { $actionRank[$_.CleanupAction] } else { 9 } } }, @{ Expression = { if (-not $_.Approved) { 0 } else { 1 } } }, @{ Expression = { if ($_.InactiveDays -eq $null) { -1 } else { $_.InactiveDays } }; Descending = $true }
+  $queueList = $rows | Sort-Object @{ Expression = { if ($actionRank.ContainsKey($_.CleanupAction)) { $actionRank[$_.CleanupAction] } else { 9 } } }, @{ Expression = { if ($_.InactiveDays -eq $null) { -1 } else { $_.InactiveDays } }; Descending = $true }
   $esc = { param($s) if ($null -eq $s) { "" } else { [System.Net.WebUtility]::HtmlEncode([string]$s) } }
   $recColor = {
     param($rec)
     if ($rec -like "Disable*" -or $rec -like "Delete eligible*" -or $rec -like "Would delete*") { "#dc2626" }
-    elseif ($rec -like "Owner confirmation*" -or $rec -like "Approve*" -or $rec -like "Awaiting*") { "#d97706" }
+    elseif ($rec -like "Owner confirmation*" -or $rec -like "Approve*" -or $rec -like "Awaiting*" -or $rec -like "Review*") { "#d97706" }
     elseif ($rec -like "Keep*") { "#16a34a" } else { "#475569" }
   }
 
@@ -730,7 +710,6 @@ try {
     param($u, $n)
     $stBg = switch ($u.Status) { "Active" { "#dcfce7" } "Dormant" { "#fef3c7" } "Stale" { "#ffedd5" } "NeverSignedIn" { "#fee2e2" } default { "#f1f5f9" } }
     $stFg = switch ($u.Status) { "Active" { "#16a34a" } "Dormant" { "#d97706" } "Stale" { "#ea580c" } "NeverSignedIn" { "#dc2626" } default { "#475569" } }
-    $apprBadge = if ($u.Approved) { "<span style='color:#16a34a;font-weight:600;'>Approved</span>" } else { "<span style='color:#dc2626;'>Non-Approved</span>" }
     $lc = @()
     if ($u.Sightings -and $u.Sightings -ne "-") { $lc += "sight $($u.Sightings)" }
     if ($u.DisableEligible) { $lc += "dis-elig $($u.DisableEligible)" }
@@ -738,7 +717,7 @@ try {
     $lcTxt = if ($lc) { ($lc -join " • ") } else { "-" }
     $inact = if ($u.InactiveDays -ne $null) { "$($u.InactiveDays)d inactive" } else { "-" }
     $ownerTxt = if ($u.BusinessOwner) { $u.BusinessOwner } else { "Unassigned" }
-    return "<tr style='border-bottom:1px solid #f1f5f9;'><td style='padding:8px 6px;text-align:center;font-size:11px;color:#64748b;'>$n</td><td style='padding:8px 6px;'><strong>$(& $esc $u.DisplayName)</strong><br><span style='font-size:11px;color:#64748b;'>$(& $esc $u.UserPrincipalName)</span></td><td style='padding:8px 6px;text-align:center;'><span style='background:$stBg;color:$stFg;border-radius:12px;padding:2px 8px;font-size:10px;font-weight:600;'>$($u.Status)</span><br><span style='font-size:10px;color:#64748b;'>$inact</span></td><td style='padding:8px 6px;font-size:11px;'><strong>$(& $esc $u.AccessSummary)</strong> ($apprBadge)<br><span style='color:#64748b;'>Owner: $(& $esc $ownerTxt)</span></td><td style='padding:8px 6px;font-size:11px;'><strong style='color:$(& $recColor $u.RecommendedAction);'>$(& $esc $u.RecommendedAction)</strong><br><span style='font-size:10px;color:#64748b;'>$lcTxt</span></td></tr>"
+    return "<tr style='border-bottom:1px solid #f1f5f9;'><td style='padding:8px 6px;text-align:center;font-size:11px;color:#64748b;'>$n</td><td style='padding:8px 6px;'><strong>$(& $esc $u.DisplayName)</strong><br><span style='font-size:11px;color:#64748b;'>$(& $esc $u.UserPrincipalName)</span></td><td style='padding:8px 6px;text-align:center;'><span style='background:$stBg;color:$stFg;border-radius:12px;padding:2px 8px;font-size:10px;font-weight:600;'>$($u.Status)</span><br><span style='font-size:10px;color:#64748b;'>$inact</span></td><td style='padding:8px 6px;font-size:11px;'><strong>$(& $esc $u.AccessSummary)</strong><br><span style='color:#64748b;'>Owner: $(& $esc $ownerTxt)</span></td><td style='padding:8px 6px;font-size:11px;'><strong style='color:$(& $recColor $u.RecommendedAction);'>$(& $esc $u.RecommendedAction)</strong><br><span style='font-size:10px;color:#64748b;'>$lcTxt</span></td></tr>"
   }
   $queueHead = "<tr style='background:#f1f5f9;'><td style='padding:8px 6px; font-weight:600; text-align:center; font-size:11px; width:28px;'>#</td><td style='padding:8px 6px; font-weight:600; font-size:11px;'>Guest</td><td style='padding:8px 6px; font-weight:600; text-align:center; font-size:11px; width:110px;'>Status</td><td style='padding:8px 6px; font-weight:600; font-size:11px;'>Access & Business Owner</td><td style='padding:8px 6px; font-weight:600; font-size:11px;'>Action / Lifecycle</td></tr>"
 
@@ -873,7 +852,7 @@ try {
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px; background:#eff6ff; border-left:4px solid #2563eb; border-radius:4px;">
     <tr><td style="padding:16px 20px;">
         <div style="font-size:15px; font-weight:700; color:#1e3a8a; margin-bottom:6px;">Executive Summary</div>
-        <div style="font-size:13px; color:#1e40af; line-height:1.7;"><strong>$total</strong> Total Guests • <strong>$($stale + $never)</strong> ($(& $pct ($stale + $never))%) Stale / Never Signed In • <strong>$recentInvitesC</strong> ($recentPct%) Recently Invited (&le; 7d) • <strong>$pendingAccept</strong> Pending Invitations • <strong>$recDisable</strong> Disable After Review • <strong>$recApprove</strong> Approval Candidates. Recommended focus: review the <strong>$nonApprStale non-approved stale/never-signed-in guests</strong> before enabling lifecycle cleanup.</div>
+        <div style="font-size:13px; color:#1e40af; line-height:1.7;"><strong>$total</strong> Total Guests • <strong>$($stale + $never)</strong> ($(& $pct ($stale + $never))%) Stale / Never Signed In • <strong>$recentInvitesC</strong> ($recentPct%) Recently Invited (&le; 7d) • <strong>$pendingAccept</strong> Pending Invitations • <strong>$recDisable</strong> Disable Candidates • <strong>$recKeep</strong> Active / In Use. Recommended focus: review the <strong>$($stale + $never) stale & never-signed-in guests</strong> before enabling automated lifecycle cleanup.</div>
     </td></tr>
 </table>
 
@@ -918,7 +897,7 @@ try {
     </tr>
 </table>
 
-<!-- Governance KPI row: Recently Invited, Pending, Approved, Non-Approved -->
+<!-- Governance KPI row: Recently Invited, Pending, Stale/Never, Disabled -->
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
     <tr>
         <td width="25%" style="padding-right:12px; vertical-align:top;">
@@ -936,17 +915,17 @@ try {
             </td></tr></table>
         </td>
         <td width="25%" style="padding-right:12px; vertical-align:top;">
-            <table width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; border:1px solid #e2e8f0; border-top:4px solid #16a34a;"><tr><td style="padding:16px; text-align:center;">
-                <div style="font-size:11px; font-weight:600; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">APPROVED GUESTS</div>
-                <div style="font-size:28px; font-weight:700; color:#16a34a;">$approvedC</div>
-                <div style="font-size:11px; color:#64748b;">in $ApprovedGroupName</div>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; border:1px solid #e2e8f0; border-top:4px solid #ea580c;"><tr><td style="padding:16px; text-align:center;">
+                <div style="font-size:11px; font-weight:600; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">STALE & NEVER SIGNED IN</div>
+                <div style="font-size:28px; font-weight:700; color:#ea580c;">$($stale + $never)</div>
+                <div style="font-size:11px; color:#64748b;">$stalePct% • cleanup candidates</div>
             </td></tr></table>
         </td>
         <td width="25%" style="vertical-align:top;">
             <table width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff; border-radius:12px; border:1px solid #e2e8f0; border-top:4px solid #dc2626;"><tr><td style="padding:16px; text-align:center;">
-                <div style="font-size:11px; font-weight:600; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">NON-APPROVED GUESTS</div>
-                <div style="font-size:28px; font-weight:700; color:#dc2626;">$nonApprovedC</div>
-                <div style="font-size:11px; color:#64748b;">not in approval group • $nonApprStale stale</div>
+                <div style="font-size:11px; font-weight:600; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">DISABLED ACCOUNTS</div>
+                <div style="font-size:28px; font-weight:700; color:#dc2626;">$disabledC</div>
+                <div style="font-size:11px; color:#64748b;">held in Stage 1 / Stage 2 delete clock</div>
             </td></tr></table>
         </td>
     </tr>
@@ -1038,31 +1017,6 @@ try {
     </tr>
 </table>
 
-<!-- Approval 2x2 matrix -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px; background:#ffffff; border-radius:16px; border:1px solid #e2e8f0;">
-    <tr><td style="padding:24px;">
-        <div style="font-size:16px; font-weight:600; color:#0f172a;">Approval × Activity Matrix</div>
-        <div style="font-size:12px; color:#64748b; margin-bottom:12px;">The $nonApprStale non-approved stale/never guests are the primary cleanup queue. ($unknownC guests with no dates excluded.)</div>
-        <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px; border-collapse:collapse; background:#fafafa; border-radius:8px;">
-            <tr style="background:#f1f5f9;">
-                <td style="padding:10px 8px; font-weight:600;"></td>
-                <td style="padding:10px 8px; font-weight:600; text-align:center;">Active / Dormant</td>
-                <td style="padding:10px 8px; font-weight:600; text-align:center;">Stale / Never</td>
-            </tr>
-            <tr style="border-bottom:1px solid #f1f5f9;">
-                <td style="padding:10px 8px; font-weight:600;">Approved</td>
-                <td style="padding:10px 8px; text-align:center; font-size:18px; font-weight:700; color:#16a34a;">$apprActive</td>
-                <td style="padding:10px 8px; text-align:center; font-size:18px; font-weight:700; color:#d97706;">$apprStale</td>
-            </tr>
-            <tr>
-                <td style="padding:10px 8px; font-weight:600;">Non-approved</td>
-                <td style="padding:10px 8px; text-align:center; font-size:18px; font-weight:700; color:#2563eb;">$nonApprActive</td>
-                <td style="padding:10px 8px; text-align:center; font-size:18px; font-weight:700; color:#dc2626; background:#fef2f2;">$nonApprStale</td>
-            </tr>
-        </table>
-    </td></tr>
-</table>
-
 <!-- Top invited domains -->
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px; background:#ffffff; border-radius:16px; border:1px solid #e2e8f0;">
     <tr><td style="padding:24px;">
@@ -1129,8 +1083,7 @@ try {
         <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px; border-collapse:collapse; color:#334155;">
             <tr style="border-bottom:1px solid #f1f5f9;"><td style="padding:8px 4px; width:28px; vertical-align:top;">1️⃣</td><td style="padding:8px 4px;"><strong>SPO OTP Context:</strong> External users without a B2B guest account lose access to shared links post-retirement. This periodic review governs that external guest population.</td></tr>
             <tr style="border-bottom:1px solid #f1f5f9;"><td style="padding:8px 4px; vertical-align:top;">2️⃣</td><td style="padding:8px 4px;"><strong>2-Stage Safety Lifecycle:</strong> Stale guests are disabled first (requiring $RequireRuns consecutive sightings + ${GracePeriodDays}d grace). Disabled accounts are soft-deleted after ${DeleteAfterDisabledDays}d (holding a 30-day recovery window in Entra recycle bin).</td></tr>
-            <tr style="border-bottom:1px solid #f1f5f9;"><td style="padding:8px 4px; vertical-align:top;">3️⃣</td><td style="padding:8px 4px;"><strong>Approval Rule:</strong> A guest is formally approved only while in <em>$ApprovedGroupName</em>. Non-approved stale guests are primary cleanup candidates.</td></tr>
-            <tr><td style="padding:8px 4px; vertical-align:top;">4️⃣</td><td style="padding:8px 4px;"><strong>Methodology:</strong> Sign-in source: $(if ($signInOk) { 'Entra signInActivity' } else { 'account-age proxy' }). Direct privileged group detection excludes firm branding. Detailed per-guest analysis is available in the attached CSV and standalone HTML files.</td></tr>
+            <tr><td style="padding:8px 4px; vertical-align:top;">3️⃣</td><td style="padding:8px 4px;"><strong>Methodology:</strong> Sign-in source: $(if ($signInOk) { 'Entra signInActivity' } else { 'account-age proxy' }). Direct privileged group detection identifies elevated access. Detailed per-guest analysis is available in the attached CSV and standalone HTML files.</td></tr>
         </table>
     </td></tr>
 </table>
@@ -1163,7 +1116,7 @@ try {
     Write-Log "Sending email via Graph ($SenderEmail -> $RecipientEmail)..."
     $subject = $SubjectTemplate.Replace("{Date}", (Get-Date -Format "yyyy-MM-dd"))
     if ($IsDryRun) { $subject = "[DRY RUN] $subject" }
-    $subject += " | Total: $total | Approved: $approvedC | NonApproved: $nonApprovedC | Stale+Never: $($stale + $never) | Recent(<7d): $recentInvitesC | DisabledNow: $justDisabled | DeletedNow: $justDeleted | Hold: $onHold | Pending: $pending"
+    $subject += " | Total: $total | Stale+Never: $($stale + $never) | Recent(<7d): $recentInvitesC | DisabledNow: $justDisabled | DeletedNow: $justDeleted | Hold: $onHold | Pending: $pending"
     if ($IsDryRun -and ($whatif + $whatifDel) -gt 0) {
       $subject += " | DryRunEligible: (Disable=$whatif, Delete=$whatifDel)"
     }
@@ -1187,7 +1140,7 @@ try {
   }
   Write-Host "Total: $total | Active: $active | Dormant: $dormant | Stale: $stale | Never: $never | Disabled-already: $staleDis" -ForegroundColor White
   Write-Host "Cleanup: disabled-now=$justDisabled deleted-now=$justDeleted hold=$onHold pending=$pending whatif=$($whatif + $whatifDel) failed=$($failed + $delFailed) (DryRun=$IsDryRun AutoDisable=$AutoDisable AutoDelete=$AutoDelete DeleteAfter=${DeleteAfterDisabledDays}d)" -ForegroundColor Cyan
-  Write-Host "Invites: recent(<7d)=$recentInvitesC pending=$pendingAccept accepted=$acceptedC | NoInviter=$noInviter | PrivGrp=$privGuests | InTeams=$teamGuests | Approved=$approvedC NonApproved=$nonApprovedC" -ForegroundColor Yellow
+  Write-Host "Invites: recent(<7d)=$recentInvitesC pending=$pendingAccept accepted=$acceptedC | NoInviter=$noInviter | PrivGrp=$privGuests | InTeams=$teamGuests" -ForegroundColor Yellow
   Write-Log "Done. CSV=$csvName STALE=$staleName HTML=$htmlName" -Level "SUCCESS"
 }
 catch {
